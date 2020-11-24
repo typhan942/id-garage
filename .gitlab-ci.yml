@@ -1,0 +1,116 @@
+image: "$CI_REGISTRY_IMAGE:android-build"
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ''
+  BUILD_IMAGE_NAME: "$CI_REGISTRY_IMAGE:android-build"
+
+stages:
+  - lint
+  - quality
+  - docker
+  - build
+
+.functions: &functions |
+  [[ ${DEBUG-0} -eq 1 ]] && set -x
+  [[ "${CI_COMMIT_TAG}" != "" ]] && JOB_NAME=${CI_COMMIT_TAG} || JOB_NAME=${CI_COMMIT_SHORT_SHA}
+
+  mkdir -p dist
+
+  function getAndroidArtifact() {
+    VARIANT=$1
+    TYPE=$2
+
+    NAME="id-garages-${VARIANT}-${JOB_NAME}.${TYPE}"
+    FILE="android/app/build/outputs/${TYPE}/${VARIANT}/app-${VARIANT}.${TYPE}"
+    [[ -f "${FILE}" ]] && mv "${FILE}" "dist/${NAME}" || echo "File not found: ${FILE}"
+  }
+
+.android-build:
+  stage: build
+  tags:
+    - docker
+  before_script:
+    - *functions
+    - echo $KEYSTORE | base64 -d > android/app.keystore
+    - echo "keystorePath=app.keystore" > android/signing.properties
+    - echo "keystorePassword=$KEYSTORE_PASSWORD" >> android/signing.properties
+    - echo "keyAlias=$KEY_ALIAS" >> android/signing.properties
+    - echo "keyPassword=$KEY_PASSWORD" >> android/signing.properties
+    - yarn install
+  only:
+    - master
+    - dev-master
+    - tags
+  artifacts:
+    paths:
+      - dist
+
+eslint:
+  stage: lint
+  image: node:12.18
+  tags:
+    - docker
+  script:
+    - npm install -g eslint >/dev/null
+    - npm install >/dev/null
+    - eslint src/**
+  allow_failure: true
+
+sonarqube:
+  stage: quality
+  image:
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  tags:
+    - docker
+  variables:
+    SONAR_TOKEN: "$SONAR_TOKEN"
+    SONAR_HOST_URL: "$SONAR_HOST_URL"
+  script:
+    - sonar-scanner -Dsonar.qualitygate.wait=true -Dsonar.projectKey=$SONAR_PROJECT_KEY
+  allow_failure: true
+  only:
+    - master
+    - dev-master
+
+docker-android:
+  stage: docker
+  image: docker:stable
+  tags:
+    - dind
+  services:
+    - docker:dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull $BUILD_IMAGE_NAME || true
+    - docker build --cache-from $BUILD_IMAGE_NAME --tag $BUILD_IMAGE_NAME --file .docker/android/Dockerfile .
+    - docker push $BUILD_IMAGE_NAME
+  only:
+    changes:
+      - .docker/android/**/*
+
+android-assemble-debug:
+  extends: .android-build
+  script:
+    - yarn android-assemble-debug
+    - getAndroidArtifact debug apk
+
+android-bundle-debug:
+  extends: .android-build
+  script:
+    - yarn android-bundle-debug
+    - getAndroidArtifact debug aar
+
+android-assemble-rlease:
+  extends: .android-build
+  script:
+    - yarn android-assemble-release
+    - getAndroidArtifact release apk
+
+android-bundle-rlease:
+  extends: .android-build
+  script:
+    - yarn android-bundle-release
+    - getAndroidArtifact release aar
